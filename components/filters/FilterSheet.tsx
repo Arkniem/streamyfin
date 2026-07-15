@@ -7,7 +7,14 @@ import {
 } from "@gorhom/bottom-sheet";
 import { isEqual } from "lodash";
 import type React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import {
   StyleSheet,
@@ -19,11 +26,21 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Text } from "@/components/common/Text";
 import { Button } from "../Button";
 import { Input } from "../common/Input";
+import { Loader } from "../Loader";
 
 interface Props<T> extends ViewProps {
   open: boolean;
   setOpen: (open: boolean) => void;
+  /**
+   * Modal ref the opener must use to present() the sheet from inside its
+   * press handler. On the new architecture with Reanimated 4, present()
+   * called from an effect after a state update silently no-ops — the sheet
+   * mounts nothing. Presenting straight from the gesture handler works.
+   */
+  modalRef: React.RefObject<BottomSheetModal | null>;
   data?: T[] | null;
+  /** True while the options are loading — shows a loader inside the sheet. */
+  loading?: boolean;
   values: T[];
   set: (value: T[]) => void;
   title: string;
@@ -66,16 +83,18 @@ const LIMIT = 100;
 export const FilterSheet = <T,>({
   values,
   data: _data,
+  loading = false,
   open,
   set,
   setOpen,
+  modalRef,
   title,
   searchFilter,
   renderItemLabel,
   disableSearch = false,
   multiple = false,
 }: Props<T>) => {
-  const bottomSheetModalRef = useRef<BottomSheetModal>(null);
+  const bottomSheetModalRef = modalRef;
   const snapPoints = useMemo(() => ["85%"], []);
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
@@ -84,19 +103,24 @@ export const FilterSheet = <T,>({
   const [offset, setOffset] = useState<number>(0);
 
   const [search, setSearch] = useState<string>("");
+  // Filtering and re-rendering the option list on every keystroke blocks the
+  // JS thread on large lists (2000+ tags); the controlled input then snaps the
+  // native text back to a stale value (lost/reappearing letters). Deferring the
+  // value keeps the keystroke render cheap and runs the list update after.
+  const deferredSearch = useDeferredValue(search);
 
   const [showSearch, setShowSearch] = useState<boolean>(false);
 
   const filteredData = useMemo(() => {
-    if (!search) return _data;
+    if (!deferredSearch) return _data;
     const results = [];
     for (let i = 0; i < (_data?.length || 0); i++) {
-      if (_data && searchFilter?.(_data[i], search)) {
+      if (_data && searchFilter?.(_data[i], deferredSearch)) {
         results.push(_data[i]);
       }
     }
     return results.slice(0, 100);
-  }, [search, _data, searchFilter]);
+  }, [deferredSearch, _data, searchFilter]);
 
   useEffect(() => {
     if (!data || data.length === 0 || disableSearch) return;
@@ -127,21 +151,28 @@ export const FilterSheet = <T,>({
     setData(newData);
   }, [offset, _data]);
 
+  // Opening is imperative (see the modalRef prop); this effect only closes.
+  // It also never calls dismiss() on a modal that was never presented.
+  const wasPresentedRef = useRef(false);
   useEffect(() => {
-    if (open) bottomSheetModalRef.current?.present();
-    else bottomSheetModalRef.current?.dismiss();
+    if (!open && wasPresentedRef.current) {
+      bottomSheetModalRef.current?.dismiss();
+    }
   }, [open]);
 
   const handleSheetChanges = useCallback((index: number) => {
-    if (index === -1) {
+    if (index >= 0) {
+      wasPresentedRef.current = true;
+    } else if (index === -1) {
+      wasPresentedRef.current = false;
       setOpen(false);
     }
   }, []);
 
   const renderData = useMemo(() => {
-    if (search.length > 0 && showSearch) return filteredData;
+    if (deferredSearch.length > 0 && showSearch) return filteredData;
     return data;
-  }, [search, filteredData, data]);
+  }, [deferredSearch, showSearch, filteredData, data]);
 
   const renderBackdrop = useCallback(
     (props: BottomSheetBackdropProps) => (
@@ -152,6 +183,54 @@ export const FilterSheet = <T,>({
       />
     ),
     [],
+  );
+
+  // Memoized so typing in the search input (urgent render with an unchanged
+  // deferred value) doesn't rebuild up to 100 row elements per keystroke.
+  const renderedRows = useMemo(
+    () =>
+      renderData?.map((item, index) => (
+        <View key={index}>
+          <TouchableOpacity
+            onPress={() => {
+              // Match the deep-equality rule used to render the selected
+              // state below — option objects are recreated across renders,
+              // so reference checks would re-add an already selected item.
+              const isSelected = values.some((value) => isEqual(value, item));
+              if (multiple) {
+                if (!isSelected) set(values.concat(item));
+                else set(values.filter((value) => !isEqual(value, item)));
+
+                setTimeout(() => {
+                  setOpen(false);
+                }, 250);
+              } else {
+                if (!isSelected) {
+                  set([item]);
+                  setTimeout(() => {
+                    setOpen(false);
+                  }, 250);
+                }
+              }
+            }}
+            className=' bg-neutral-800 px-4 py-3 flex flex-row items-center justify-between'
+          >
+            <Text className='flex shrink'>{renderItemLabel(item)}</Text>
+            {values.some((i) => isEqual(i, item)) ? (
+              <Ionicons name='radio-button-on' size={24} color='white' />
+            ) : (
+              <Ionicons name='radio-button-off' size={24} color='white' />
+            )}
+          </TouchableOpacity>
+          <View
+            style={{
+              height: StyleSheet.hairlineWidth,
+            }}
+            className='h-1 divide-neutral-700 '
+          />
+        </View>
+      )),
+    [renderData, values, multiple, set, setOpen, renderItemLabel],
   );
 
   return (
@@ -182,9 +261,15 @@ export const FilterSheet = <T,>({
           }}
         >
           <Text className='font-bold text-2xl'>{title}</Text>
-          <Text className='mb-2 text-neutral-500'>
-            {t("search.x_items", { count: _data?.length })}
-          </Text>
+          {loading ? (
+            <View className='my-8 flex items-center justify-center'>
+              <Loader />
+            </View>
+          ) : (
+            <Text className='mb-2 text-neutral-500'>
+              {t("search.x_items", { count: _data?.length })}
+            </Text>
+          )}
           {showSearch && (
             <Input
               placeholder={t("search.search")}
@@ -203,43 +288,7 @@ export const FilterSheet = <T,>({
             }}
             className='mb-4 flex flex-col rounded-xl overflow-hidden'
           >
-            {renderData?.map((item, index) => (
-              <View key={index}>
-                <TouchableOpacity
-                  onPress={() => {
-                    if (multiple) {
-                      if (!values.includes(item)) set(values.concat(item));
-                      else set(values.filter((v) => v !== item));
-
-                      setTimeout(() => {
-                        setOpen(false);
-                      }, 250);
-                    } else {
-                      if (!values.includes(item)) {
-                        set([item]);
-                        setTimeout(() => {
-                          setOpen(false);
-                        }, 250);
-                      }
-                    }
-                  }}
-                  className=' bg-neutral-800 px-4 py-3 flex flex-row items-center justify-between'
-                >
-                  <Text className='flex shrink'>{renderItemLabel(item)}</Text>
-                  {values.some((i) => isEqual(i, item)) ? (
-                    <Ionicons name='radio-button-on' size={24} color='white' />
-                  ) : (
-                    <Ionicons name='radio-button-off' size={24} color='white' />
-                  )}
-                </TouchableOpacity>
-                <View
-                  style={{
-                    height: StyleSheet.hairlineWidth,
-                  }}
-                  className='h-1 divide-neutral-700 '
-                />
-              </View>
-            ))}
+            {renderedRows}
           </View>
           {data.length < (_data?.length || 0) && (
             <Button

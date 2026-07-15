@@ -1,9 +1,11 @@
 import { FontAwesome, Ionicons } from "@expo/vector-icons";
+import type { BottomSheetModal } from "@gorhom/bottom-sheet";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { TouchableOpacity, View, type ViewProps } from "react-native";
 import { Text } from "@/components/common/Text";
 import { FilterSheet } from "./FilterSheet";
+import { useFilterSheet } from "./FilterSheetProvider";
 
 interface FilterButtonProps<T> extends ViewProps {
   id: string;
@@ -33,22 +35,63 @@ export const FilterButton = <T,>({
   icon = "filter",
   ...props
 }: FilterButtonProps<T>) => {
-  const [open, setOpen] = useState(false);
+  // When a FilterSheetProvider is present (library / collections), all buttons
+  // share one sheet so two can never stack. Outside a provider (e.g. logs,
+  // discover), fall back to this button's own standalone sheet.
+  const shared = useFilterSheet();
 
-  const { data: filters } = useQuery<T[]>({
+  const { data: filters, isLoading } = useQuery<T[]>({
     queryKey: ["filters", title, queryKey, id],
     queryFn,
     staleTime: 0,
     enabled: !!id && !!queryFn && !!queryKey,
   });
 
+  // Standalone-mode state (unused in shared mode).
+  const [open, setOpen] = useState(false);
+  const sheetModalRef = useRef<BottomSheetModal | null>(null);
+
+  const onButtonPress = useCallback(() => {
+    if (shared) {
+      shared.openFilter({
+        key: `${id}:${queryKey}`,
+        id,
+        queryKey,
+        queryFn,
+        title,
+        values: values as unknown[],
+        set: set as (value: unknown[]) => void,
+        renderItemLabel: renderItemLabel as (item: unknown) => React.ReactNode,
+        searchFilter: searchFilter as
+          | ((item: unknown, query: string) => boolean)
+          | undefined,
+        disableSearch,
+        multiple,
+      });
+      return;
+    }
+    // present() must run from the press handler: from an effect after a state
+    // update it silently no-ops on the new architecture and the sheet never
+    // appears.
+    setOpen(true);
+    sheetModalRef.current?.present();
+  }, [
+    shared,
+    id,
+    queryKey,
+    queryFn,
+    title,
+    values,
+    set,
+    renderItemLabel,
+    searchFilter,
+    disableSearch,
+    multiple,
+  ]);
+
   return (
     <>
-      <TouchableOpacity
-        onPress={() => {
-          filters?.length && setOpen(true);
-        }}
-      >
+      <TouchableOpacity onPress={onButtonPress}>
         <View
           className={`
             px-3 py-1.5 rounded-full flex flex-row items-center space-x-1
@@ -85,18 +128,22 @@ export const FilterButton = <T,>({
           )}
         </View>
       </TouchableOpacity>
-      <FilterSheet<T>
-        title={title}
-        open={open}
-        setOpen={setOpen}
-        data={filters}
-        values={values}
-        set={set}
-        renderItemLabel={renderItemLabel}
-        searchFilter={searchFilter}
-        disableSearch={disableSearch}
-        multiple={multiple}
-      />
+      {!shared && (
+        <FilterSheet<T>
+          title={title}
+          open={open}
+          setOpen={setOpen}
+          modalRef={sheetModalRef}
+          loading={isLoading}
+          data={filters}
+          values={values}
+          set={set}
+          renderItemLabel={renderItemLabel}
+          searchFilter={searchFilter}
+          disableSearch={disableSearch}
+          multiple={multiple}
+        />
+      )}
     </>
   );
 };

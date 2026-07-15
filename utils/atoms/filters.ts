@@ -1,6 +1,5 @@
 import { atom } from "jotai";
-import { atomWithStorage } from "jotai/utils";
-import { storage } from "../mmkv";
+import { useMemo } from "react";
 import { useSettings } from "./settings";
 
 export enum SortByOption {
@@ -59,32 +58,36 @@ export const sortOptions: {
 
 export const useFilterOptions = () => {
   const { settings } = useSettings();
-  // We want to only show the watchlist option if someone has ticked that setting.
-  const filterOptions = settings?.useKefinTweaks
-    ? [
-        {
-          key: FilterByOption.IsFavoriteOrLiked,
-          value: "Is Favorite Or Liked",
-        },
-        { key: FilterByOption.IsUnplayed, value: "Is Unplayed" },
-        { key: FilterByOption.IsPlayed, value: "Is Played" },
-        { key: FilterByOption.IsFavorite, value: "Is Favorite" },
-        { key: FilterByOption.IsResumable, value: "Is Resumable" },
-        { key: FilterByOption.Likes, value: "Watchlist" },
-      ]
-    : [
-        {
-          key: FilterByOption.IsFavoriteOrLiked,
-          value: "Is Favorite Or Liked",
-        },
-        { key: FilterByOption.IsUnplayed, value: "Is Unplayed" },
-        { key: FilterByOption.IsPlayed, value: "Is Played" },
-        { key: FilterByOption.IsFavorite, value: "Is Favorite" },
-        { key: FilterByOption.IsResumable, value: "Is Resumable" },
-      ];
-  console.log("filterOptions");
-  console.log(filterOptions);
-  return filterOptions;
+  // Memoized so the array identity stays stable across renders. A fresh array
+  // each render cascades into ListHeaderComponent re-creation and, under heavy
+  // re-rendering (active downloads), trips React's max-update-depth guard.
+  // We only show the watchlist option if someone has ticked that setting.
+  return useMemo(
+    () =>
+      settings?.useKefinTweaks
+        ? [
+            {
+              key: FilterByOption.IsFavoriteOrLiked,
+              value: "Is Favorite Or Liked",
+            },
+            { key: FilterByOption.IsUnplayed, value: "Is Unplayed" },
+            { key: FilterByOption.IsPlayed, value: "Is Played" },
+            { key: FilterByOption.IsFavorite, value: "Is Favorite" },
+            { key: FilterByOption.IsResumable, value: "Is Resumable" },
+            { key: FilterByOption.Likes, value: "Watchlist" },
+          ]
+        : [
+            {
+              key: FilterByOption.IsFavoriteOrLiked,
+              value: "Is Favorite Or Liked",
+            },
+            { key: FilterByOption.IsUnplayed, value: "Is Unplayed" },
+            { key: FilterByOption.IsPlayed, value: "Is Played" },
+            { key: FilterByOption.IsFavorite, value: "Is Favorite" },
+            { key: FilterByOption.IsResumable, value: "Is Resumable" },
+          ],
+    [settings?.useKefinTweaks],
+  );
 };
 
 export const sortOrderOptions: {
@@ -120,56 +123,27 @@ const defaultSortPreference: SortPreference = {};
 const defaultSortOrderPreference: SortOrderPreference = {};
 const defaultFilterPreference: FilterPreference = {};
 
-export const sortByPreferenceAtom = atomWithStorage<SortPreference>(
-  "sortByPreference",
-  defaultSortPreference,
-  {
-    getItem: (key) => {
-      const value = storage.getString(key);
-      return value ? JSON.parse(value) : null;
-    },
-    setItem: (key, value) => {
-      storage.set(key, JSON.stringify(value));
-    },
-    removeItem: (key) => {
-      storage.remove(key);
-    },
-  },
-);
+// Per-library filter memory is intentionally in-memory (NOT atomWithStorage):
+// each library keeps its own filters for the session, and everything resets
+// when the app is fully closed.
+export const sortByPreferenceAtom = atom<SortPreference>(defaultSortPreference);
 
-export const FilterByPreferenceAtom = atomWithStorage<FilterPreference>(
-  "filterByPreference",
+export const FilterByPreferenceAtom = atom<FilterPreference>(
   defaultFilterPreference,
-  {
-    getItem: (key) => {
-      const value = storage.getString(key);
-      return value ? JSON.parse(value) : null;
-    },
-    setItem: (key, value) => {
-      storage.set(key, JSON.stringify(value));
-    },
-    removeItem: (key) => {
-      storage.remove(key);
-    },
-  },
 );
 
-export const sortOrderPreferenceAtom = atomWithStorage<SortOrderPreference>(
-  "sortOrderPreference",
+export const sortOrderPreferenceAtom = atom<SortOrderPreference>(
   defaultSortOrderPreference,
-  {
-    getItem: (key) => {
-      const value = storage.getString(key);
-      return value ? JSON.parse(value) : null;
-    },
-    setItem: (key, value) => {
-      storage.set(key, JSON.stringify(value));
-    },
-    removeItem: (key) => {
-      storage.remove(key);
-    },
-  },
 );
+
+// Genres / years / tags are multi-select, so each library remembers an array.
+export interface MultiFilterPreference {
+  [libraryId: string]: string[];
+}
+
+export const genrePreferenceAtom = atom<MultiFilterPreference>({});
+export const yearPreferenceAtom = atom<MultiFilterPreference>({});
+export const tagPreferenceAtom = atom<MultiFilterPreference>({});
 
 export const getSortByPreference = (
   libraryId: string,
@@ -191,3 +165,8 @@ export const getFilterByPreference = (
 ) => {
   return preferences?.[libraryId] || null;
 };
+
+export const getMultiFilterPreference = (
+  libraryId: string,
+  preferences: MultiFilterPreference,
+) => preferences?.[libraryId] ?? [];

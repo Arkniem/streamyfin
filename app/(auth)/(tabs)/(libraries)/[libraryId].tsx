@@ -9,7 +9,7 @@ import {
   getItemsApi,
   getUserLibraryApi,
 } from "@jellyfin/sdk/lib/utils/api";
-import { FlashList } from "@shopify/flash-list";
+import { FlashList, type FlashListRef } from "@shopify/flash-list";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Image } from "expo-image";
 import {
@@ -35,6 +35,7 @@ import {
   TouchableItemRouter,
 } from "@/components/common/TouchableItemRouter";
 import { FilterButton } from "@/components/filters/FilterButton";
+import { FilterSheetProvider } from "@/components/filters/FilterSheetProvider";
 import { ResetFiltersButton } from "@/components/filters/ResetFiltersButton";
 import { ItemCardText } from "@/components/ItemCardText";
 import { Loader } from "@/components/Loader";
@@ -44,6 +45,7 @@ import { TVPosterCard } from "@/components/tv/TVPosterCard";
 import { useScaledTVPosterSizes } from "@/constants/TVPosterSizes";
 import { useScaledTVTypography } from "@/constants/TVTypography";
 import useRouter from "@/hooks/useAppRouter";
+import { useFilterReset } from "@/hooks/useFilterReset";
 import { useOrientation } from "@/hooks/useOrientation";
 import { useRefreshLibraryOnFocus } from "@/hooks/useRefreshLibraryOnFocus";
 import { useTVItemActionModal } from "@/hooks/useTVItemActionModal";
@@ -55,7 +57,9 @@ import {
   FilterByPreferenceAtom,
   filterByAtom,
   genreFilterAtom,
+  genrePreferenceAtom,
   getFilterByPreference,
+  getMultiFilterPreference,
   getSortByPreference,
   getSortOrderPreference,
   SortByOption,
@@ -66,11 +70,12 @@ import {
   sortOrderAtom,
   sortOrderOptions,
   sortOrderPreferenceAtom,
+  tagPreferenceAtom,
   tagsFilterAtom,
   useFilterOptions,
   yearFilterAtom,
+  yearPreferenceAtom,
 } from "@/utils/atoms/filters";
-import { useSettings } from "@/utils/atoms/settings";
 import type { TVOptionItem } from "@/utils/atoms/tvOptionModal";
 import { getPrimaryImageUrl } from "@/utils/jellyfin/image/getPrimaryImageUrl";
 
@@ -108,6 +113,9 @@ const Page = () => {
   const [sortOrderPreference, setOrderByPreference] = useAtom(
     sortOrderPreferenceAtom,
   );
+  const [genrePreference, setGenrePreference] = useAtom(genrePreferenceAtom);
+  const [yearPreference, setYearPreference] = useAtom(yearPreferenceAtom);
+  const [tagPreference, setTagPreference] = useAtom(tagPreferenceAtom);
 
   const { orientation } = useOrientation();
 
@@ -205,6 +213,13 @@ const Page = () => {
       const fp = getFilterByPreference(libraryId, filterByPreference);
       _setFilterBy(fp ? [fp] : []);
     }
+
+    // Genres / years / tags: per-library saved preference (no URL params), so
+    // switching libraries restores each library's own selection instead of
+    // bleeding the previous one.
+    setSelectedGenres(getMultiFilterPreference(libraryId, genrePreference));
+    setSelectedYears(getMultiFilterPreference(libraryId, yearPreference));
+    setSelectedTags(getMultiFilterPreference(libraryId, tagPreference));
   }, [
     libraryId,
     sortOrderPreference,
@@ -213,6 +228,12 @@ const Page = () => {
     _setSortBy,
     filterByPreference,
     _setFilterBy,
+    genrePreference,
+    yearPreference,
+    tagPreference,
+    setSelectedGenres,
+    setSelectedYears,
+    setSelectedTags,
     searchParams.sortBy,
     searchParams.sortOrder,
     searchParams.filterBy,
@@ -255,6 +276,32 @@ const Page = () => {
       _setFilterBy(filterBy);
     },
     [libraryId, filterByPreference, setFilterByPreference, _setFilterBy],
+  );
+
+  // Genres / years / tags: save the per-library memory then update the active
+  // atom (mirrors setSortBy; avoids a save-effect that would corrupt on switch).
+  const setGenres = useCallback(
+    (genres: string[]) => {
+      setGenrePreference({ ...genrePreference, [libraryId]: genres });
+      setSelectedGenres(genres);
+    },
+    [libraryId, genrePreference, setGenrePreference, setSelectedGenres],
+  );
+
+  const setYears = useCallback(
+    (years: string[]) => {
+      setYearPreference({ ...yearPreference, [libraryId]: years });
+      setSelectedYears(years);
+    },
+    [libraryId, yearPreference, setYearPreference, setSelectedYears],
+  );
+
+  const setTags = useCallback(
+    (tags: string[]) => {
+      setTagPreference({ ...tagPreference, [libraryId]: tags });
+      setSelectedTags(tags);
+    },
+    [libraryId, tagPreference, setTagPreference, setSelectedTags],
   );
 
   const nrOfCols = useMemo(() => {
@@ -415,6 +462,29 @@ const Page = () => {
     );
   }, [data]);
 
+  const flashListRef = useRef<FlashListRef<BaseItemDto>>(null);
+
+  // Jump the grid to the top when the filters/sort change (incl. reset).
+  const filterSignature = `${selectedGenres}|${selectedYears}|${selectedTags}|${sortBy[0]}|${sortOrder[0]}|${filterBy}`;
+  const pendingScrollTopRef = useRef(false);
+
+  // Instant feedback: pin to the top the moment the filters change, without
+  // waiting for the new fetch — and flag a re-pin for once it settles.
+  useEffect(() => {
+    flashListRef.current?.scrollToOffset({ offset: 0, animated: false });
+    pendingScrollTopRef.current = true;
+  }, [filterSignature]);
+
+  // Safety net: FlashList can restore the previous offset as the filtered list
+  // grows, so re-pin once the fetch settles. Pagination keeps the same
+  // signature, so it never re-pins.
+  useEffect(() => {
+    if (pendingScrollTopRef.current && !isFetching) {
+      pendingScrollTopRef.current = false;
+      flashListRef.current?.scrollToOffset({ offset: 0, animated: false });
+    }
+  }, [isFetching, flatData]);
+
   const renderItem = useCallback(
     ({ item, index }: { item: BaseItemDto; index: number }) => (
       <TouchableItemRouter
@@ -530,7 +600,6 @@ const Page = () => {
 
   const keyExtractor = useCallback((item: BaseItemDto) => item.Id || "", []);
   const generalFilters = useFilterOptions();
-  const settings = useSettings();
   const ListHeaderComponent = useCallback(
     () => (
       <FlatList
@@ -545,7 +614,7 @@ const Page = () => {
         data={[
           {
             key: "reset",
-            component: <ResetFiltersButton />,
+            component: <ResetFiltersButton libraryId={libraryId} />,
           },
           {
             key: "genre",
@@ -564,7 +633,7 @@ const Page = () => {
                   });
                   return response.data.Genres || [];
                 }}
-                set={setSelectedGenres}
+                set={setGenres}
                 values={selectedGenres}
                 title={t("library.filters.genres")}
                 renderItemLabel={(item) => item.toString()}
@@ -591,7 +660,7 @@ const Page = () => {
                   });
                   return response.data.Years || [];
                 }}
-                set={setSelectedYears}
+                set={setYears}
                 values={selectedYears}
                 title={t("library.filters.years")}
                 renderItemLabel={(item) => item.toString()}
@@ -616,7 +685,7 @@ const Page = () => {
                   });
                   return response.data.Tags || [];
                 }}
-                set={setSelectedTags}
+                set={setTags}
                 values={selectedTags}
                 title={t("library.filters.tags")}
                 renderItemLabel={(item) => item.toString()}
@@ -696,35 +765,23 @@ const Page = () => {
       api,
       user?.Id,
       selectedGenres,
-      setSelectedGenres,
+      setGenres,
       selectedYears,
-      setSelectedYears,
+      setYears,
       selectedTags,
-      setSelectedTags,
+      setTags,
       sortBy,
       setSortBy,
       sortOrder,
       setSortOrder,
-      isFetching,
       filterBy,
       setFilter,
-      settings,
     ],
   );
 
-  // TV Filter bar header
-  const hasActiveFilters =
-    selectedGenres.length > 0 ||
-    selectedYears.length > 0 ||
-    selectedTags.length > 0 ||
-    filterBy.length > 0;
-
-  const resetAllFilters = useCallback(() => {
-    setSelectedGenres([]);
-    setSelectedYears([]);
-    setSelectedTags([]);
-    _setFilterBy([]);
-  }, [setSelectedGenres, setSelectedYears, setSelectedTags, _setFilterBy]);
+  // Filter bar reset + visibility, shared with the mobile ResetFiltersButton so
+  // sort/order can't be forgotten on one path (it used to be reset on neither).
+  const { hasActiveFilters, resetAllFilters } = useFilterReset(libraryId);
 
   // TV Filter options - with "All" option for clearable filters
   const tvGenreFilterOptions = useMemo(
@@ -818,15 +875,15 @@ const Page = () => {
       options: tvGenreFilterOptions,
       onSelect: (value: string) => {
         if (value === "__all__") {
-          setSelectedGenres([]);
+          setGenres([]);
         } else if (selectedGenres.includes(value)) {
-          setSelectedGenres(selectedGenres.filter((g) => g !== value));
+          setGenres(selectedGenres.filter((g) => g !== value));
         } else {
-          setSelectedGenres([...selectedGenres, value]);
+          setGenres([...selectedGenres, value]);
         }
       },
     });
-  }, [showOptions, t, tvGenreFilterOptions, selectedGenres, setSelectedGenres]);
+  }, [showOptions, t, tvGenreFilterOptions, selectedGenres, setGenres]);
 
   const handleShowYearFilter = useCallback(() => {
     showOptions({
@@ -834,15 +891,15 @@ const Page = () => {
       options: tvYearFilterOptions,
       onSelect: (value: string) => {
         if (value === "__all__") {
-          setSelectedYears([]);
+          setYears([]);
         } else if (selectedYears.includes(value)) {
-          setSelectedYears(selectedYears.filter((y) => y !== value));
+          setYears(selectedYears.filter((y) => y !== value));
         } else {
-          setSelectedYears([...selectedYears, value]);
+          setYears([...selectedYears, value]);
         }
       },
     });
-  }, [showOptions, t, tvYearFilterOptions, selectedYears, setSelectedYears]);
+  }, [showOptions, t, tvYearFilterOptions, selectedYears, setYears]);
 
   const handleShowTagFilter = useCallback(() => {
     showOptions({
@@ -850,15 +907,15 @@ const Page = () => {
       options: tvTagFilterOptions,
       onSelect: (value: string) => {
         if (value === "__all__") {
-          setSelectedTags([]);
+          setTags([]);
         } else if (selectedTags.includes(value)) {
-          setSelectedTags(selectedTags.filter((tag) => tag !== value));
+          setTags(selectedTags.filter((tag) => tag !== value));
         } else {
-          setSelectedTags([...selectedTags, value]);
+          setTags([...selectedTags, value]);
         }
       },
     });
-  }, [showOptions, t, tvTagFilterOptions, selectedTags, setSelectedTags]);
+  }, [showOptions, t, tvTagFilterOptions, selectedTags, setTags]);
 
   const handleShowSortByFilter = useCallback(() => {
     showOptions({
@@ -906,42 +963,45 @@ const Page = () => {
   // Mobile return
   if (!Platform.isTV) {
     return (
-      <FlashList
-        key={orientation}
-        ListEmptyComponent={
-          <View className='flex flex-col items-center justify-center h-full'>
-            <Text className='font-bold text-xl text-neutral-500'>
-              {t("library.no_results")}
-            </Text>
-          </View>
-        }
-        contentInsetAdjustmentBehavior='automatic'
-        data={flatData}
-        renderItem={renderItem}
-        extraData={[orientation, nrOfCols]}
-        keyExtractor={keyExtractor}
-        numColumns={nrOfCols}
-        onEndReached={() => {
-          if (hasNextPage) {
-            fetchNextPage();
+      <FilterSheetProvider>
+        <FlashList
+          ref={flashListRef}
+          key={orientation}
+          ListEmptyComponent={
+            <View className='flex flex-col items-center justify-center h-full'>
+              <Text className='font-bold text-xl text-neutral-500'>
+                {t("library.no_results")}
+              </Text>
+            </View>
           }
-        }}
-        onEndReachedThreshold={1}
-        ListHeaderComponent={ListHeaderComponent}
-        contentContainerStyle={{
-          paddingBottom: 24,
-          paddingLeft: insets.left,
-          paddingRight: insets.right,
-        }}
-        ItemSeparatorComponent={() => (
-          <View
-            style={{
-              width: 10,
-              height: 10,
-            }}
-          />
-        )}
-      />
+          contentInsetAdjustmentBehavior='automatic'
+          data={flatData}
+          renderItem={renderItem}
+          extraData={[orientation, nrOfCols]}
+          keyExtractor={keyExtractor}
+          numColumns={nrOfCols}
+          onEndReached={() => {
+            if (hasNextPage) {
+              fetchNextPage();
+            }
+          }}
+          onEndReachedThreshold={1}
+          ListHeaderComponent={ListHeaderComponent}
+          contentContainerStyle={{
+            paddingBottom: 24,
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          }}
+          ItemSeparatorComponent={() => (
+            <View
+              style={{
+                width: 10,
+                height: 10,
+              }}
+            />
+          )}
+        />
+      </FilterSheetProvider>
     );
   }
 
