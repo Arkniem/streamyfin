@@ -167,7 +167,6 @@ const SharedFilterSheetContent: React.FC<SharedFilterSheetContentProps> = ({
     enabled: !!id && !!queryFn && !!queryKey,
   });
 
-  const [data, setData] = useState<any[]>([]);
   const [offset, setOffset] = useState(0);
 
   const [search, setSearch] = useState("");
@@ -187,30 +186,20 @@ const SharedFilterSheetContent: React.FC<SharedFilterSheetContentProps> = ({
     return results.slice(0, 100);
   }, [deferredSearch, _data, searchFilter]);
 
+  // Paginated window derived from the live query result ("load more" grows the
+  // window). No accumulated copy: a background refetch that removes options
+  // can't leave stale rows behind, and no per-item dedupe is needed.
+  const data = useMemo(
+    () => _data?.slice(0, offset + LIMIT) ?? [],
+    [_data, offset],
+  );
+
   useEffect(() => {
     if (!data || data.length === 0 || disableSearch) return;
     if (data.length > 15) {
       setShowSearch(true);
     }
   }, [data, disableSearch]);
-
-  // Loads data in batches of LIMIT from offset (efficient "load more").
-  useEffect(() => {
-    if (!_data || _data.length === 0) return;
-
-    const newData = [...data];
-    for (let i = offset; i < Math.min(_data.length, offset + LIMIT); i++) {
-      const item = _data[i];
-      // Option objects are recreated across renders → dedupe by value.
-      const exists = newData.some((existingItem) =>
-        isEqual(existingItem, item),
-      );
-      if (!exists) {
-        newData.push(item);
-      }
-    }
-    setData(newData);
-  }, [offset, _data]);
 
   const renderData = useMemo(() => {
     if (deferredSearch.length > 0 && showSearch) return filteredData;
